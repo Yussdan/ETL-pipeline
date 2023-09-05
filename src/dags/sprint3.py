@@ -91,15 +91,17 @@ def upload_data_to_staging(filename, date, pg_table, pg_schema, ti):
     print(response.content)
 
     df = pd.read_csv(local_filename)
-    df=df.drop('id', axis=1)
-    df=df.drop_duplicates(subset=['uniq_id'])
+    df = df.drop('id', axis=1)
+    df = df.drop_duplicates(subset=['uniq_id'])
 
     if 'status' not in df.columns:
         df['status'] = 'shipped'
 
-    df.loc[df['status'] == 'refunded', 'payment_amount'] = -df.loc[df['status'] == 'refunded', 'payment_amount']
-
     postgres_hook = PostgresHook(postgres_conn_id)
+    query1 = f"DELETE FROM staging.user_order_log WHERE date_time::DATE='{date}';"
+    query2 = "ALTER TABLE staging.user_order_log ADD COLUMN IF NOT EXISTS status varchar(256);"
+    postgres_hook.run(sql=query1)
+    postgres_hook.run(sql=query2)
     engine = postgres_hook.get_sqlalchemy_engine()
     row_count = df.to_sql(pg_table, engine, schema=pg_schema, if_exists='append', index=False)
     print(f'{row_count} rows was inserted')
@@ -110,7 +112,7 @@ args = {
     'email': ['student@example.com'],
     'email_on_failure': False,
     'email_on_retry': False,
-    'retries': 0
+    'retries': 1
 }
 
 business_dt = '{{ ds }}'
@@ -122,6 +124,7 @@ with DAG(
         catchup=True,
         start_date=datetime.today() - timedelta(days=7),
         end_date=datetime.today() - timedelta(days=1),
+        max_active_runs = 1
 ) as dag:
     generate_report = PythonOperator(
         task_id='generate_report',
@@ -144,63 +147,41 @@ with DAG(
                    'pg_table': 'user_order_log',
                    'pg_schema': 'staging'})
 
-    update_d_item_table = PostgresOperator(
-        task_id='update_d_item',
-        postgres_conn_id=postgres_conn_id,
-        sql="/de-project-sprint-3/migrations/mart.d_item.sql")
+    dimension_tasks = list()    
 
-    update_d_customer_table = PostgresOperator(
-        task_id='update_d_customer',
-        postgres_conn_id=postgres_conn_id,
-        sql="/de-project-sprint-3/migrations/mart.d_customer.sql")
-
-    update_d_city_table = PostgresOperator(
-        task_id='update_d_city',
-        postgres_conn_id=postgres_conn_id,
-        sql="/de-project-sprint-3/migrations/mart.d_city.sql")
+    for i in ['d_city', 'd_item', 'd_customer']:
+        dimension_tasks.append(PostgresOperator(
+            task_id = f'load_{i}',
+            postgres_conn_id = 'postgresql_de',
+            sql = f'sql/mart.{i}.sql',
+            dag = dag
+            )
+        ) 
 
     update_f_sales = PostgresOperator(
         task_id='update_f_sales',
         postgres_conn_id=postgres_conn_id,
-        sql="/de-project-sprint-3/migrations/mart.f_sales.sql",
+        sql="sql/mart.f_sales.sql",
         parameters={"date": {business_dt}}
     )
-
-    add_column_status_f_sales = PostgresOperator(
-        task_id='add_column_status_f_sales',
-        postgres_conn_id=postgres_conn_id,
-        sql="/de-project-sprint-3/migrations/new_mart.f_sales.sql")
-
-    add_column_status_user_order_log = PostgresOperator(
-        task_id='add_column_status_user_order_log',
-        postgres_conn_id=postgres_conn_id,
-        sql="/de-project-sprint-3/migrations/new.staging.user_order_log.sql")
     
     create_mart_f_customer_retention = PostgresOperator(
         task_id='create_mart_f_customer_retention',
         postgres_conn_id=postgres_conn_id,
-        sql='/de-project-sprint-3/migrations/create_mart_f_customer_retention.sql')
+        sql='sql/create_mart_f_customer_retention.sql')
 
     upload_mart_f_customer_retention = PostgresOperator(
         task_id='upload_mart_f_customer_retention',
         postgres_conn_id=postgres_conn_id,
-        sql='/de-project-sprint-3/migrations/upload_mart_f_customer_retention.sql')
-
-    delete_data = PostgresOperator(
-        task_id='delete_data',
-        postgres_conn_id=postgres_conn_id,
-        sql='/de-project-sprint-3/migrations/delete_data.sql'
-    )
+        sql='sql/upload_mart_f_customer_retention.sql',
+        parameters={"date": {business_dt}})
 
     (
             generate_report
             >> get_report
             >> get_increment
-            >> add_column_status_user_order_log 
-            >> delete_data
             >> upload_user_order_inc
-            >> add_column_status_f_sales
-            >> [update_d_item_table, update_d_city_table, update_d_customer_table]
+            >> dimension_tasks 
             >> update_f_sales
             >> create_mart_f_customer_retention
             >> upload_mart_f_customer_retention

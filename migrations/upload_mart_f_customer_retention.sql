@@ -1,10 +1,16 @@
+DELETE FROM  mart.f_customer_retention
+WHERE period_id IN (SELECT date_id from mart.d_calendar WHERE '{{ds}}'-date_actual::DATE>7);
+
+DELETE FROM  mart.f_customer_retention
+WHERE period_id IN (SELECT date_id from mart.d_calendar WHERE '{{ds}}'=date_actual::DATE);
+
 INSERT INTO mart.f_customer_retention
 SELECT
     COUNT(distinct new_cus.customer_id) AS new_customers_count,
     COUNT(distinct ret_cus.customer_id) AS returning_customers_count,
     COUNT(distinct ref_cus.customer_id) AS refunded_customer_count,
     'weekly' AS period_name,
-    date_id ,
+    date_id,
     item_id,
     SUM(CASE WHEN new_cus.customer_id IS NOT NULL THEN new_cus.payment_amount ELSE 0 END) AS new_customers_revenue,
     SUM(CASE WHEN ret_cus.customer_id IS NOT NULL THEN ret_cus.payment_amount ELSE 0 END) AS returning_customers_revenue,
@@ -28,4 +34,6 @@ LEFT JOIN (
     WHERE status = 'refunded'
     GROUP BY customer_id
 ) AS ref_cus ON fs2.customer_id = ref_cus.customer_id
+INNER JOIN mart.d_calendar dc USING(date_id)
+WHERE dc.date_actual::DATE = '{{ds}}'
 GROUP BY date_id, item_id;
