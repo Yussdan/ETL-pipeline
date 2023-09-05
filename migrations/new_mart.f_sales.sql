@@ -1,0 +1,1 @@
+ALTER TABLE mart.f_sales ADD COLUMN IF NOT EXISTS status text;
